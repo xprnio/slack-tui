@@ -1,5 +1,12 @@
 {
-	"files":[
-		"index.ts"
-	]
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "es5",
+    "sourceMap": false,
+    "sourceRoot": "src",
+    "outDir": "dist"
+  },
+  "exclude": [
+    "node_modules"
+  ]
 }
