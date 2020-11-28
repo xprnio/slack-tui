@@ -7,3 +7,7 @@ export function createLogger(tui: SlackTUI): Logger {
     tui.view.contentBox.log(str);
   };
 }
+
+export function toCanonicalName(str: string) {
+  return str.replace(/\(.*\)/g, '');
+}
