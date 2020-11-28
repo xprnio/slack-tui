@@ -1,38 +1,32 @@
 import { SlackTeam } from './team';
 
 export interface SlackConversation {
+  readonly id: string;
+
   updateContent();
 
   postMessage(text: string);
-
-  getID(): string;
 }
 
 export class SlackChannel implements SlackConversation {
-  team: SlackTeam;
-  id: string;
-  name: string;
-  unread_count: number;
-  private _isUpdatingInfo: boolean = false;
+  public unreadCount: number;
+  private isUpdating: boolean = false;
 
-  constructor(team: SlackTeam, id: string, name: string) {
-    this.team = team;
-    this.id = id;
-    this.name = name;
-  }
-
-  isUpdatingInfo() {
-    return this._isUpdatingInfo;
-  }
+  constructor(
+    public readonly team: SlackTeam,
+    public readonly id: string,
+    public name: string,
+  ) { }
 
   updateInfo(connection) {
-    this._isUpdatingInfo = true;
+    this.isUpdating = true;
     connection.reqAPI('channels.info', { channel: this.id }, (data) => {
-      this._isUpdatingInfo = false;
-      if ( !data.ok ) return;
-      this.name = data.channel.name;
-      this.unread_count = data.channel.unread_count;
-      this.team.updateChannelListView();
+      this.isUpdating = false;
+      if ( data.ok ) {
+        this.name = data.channel.name;
+        this.unreadCount = data.channel.unread_count;
+        this.team.updateChannelListView();
+      }
     });
   }
 
@@ -44,21 +38,17 @@ export class SlackChannel implements SlackConversation {
     this.team.postMessage(this.id, text);
   }
 
-  getID() {
-    return this.id;
+  isUpdatingInfo() {
+    return this.isUpdating;
   }
 }
 
 export class SlackDM implements SlackConversation {
-  team: SlackTeam;
-  id: string;
-  name: string;
-
-  constructor(team: SlackTeam, id: string, name: string) {
-    this.team = team;
-    this.id = id;
-    this.name = name;
-  }
+  constructor(
+    public readonly team: SlackTeam,
+    public readonly id: string,
+    public readonly name: string,
+  ) { }
 
   updateContent() {
     this.team.updateContent(this.id, '@' + this.name);
@@ -66,9 +56,5 @@ export class SlackDM implements SlackConversation {
 
   postMessage(text: string) {
     this.team.postMessage(this.id, text);
-  }
-
-  getID() {
-    return this.id;
   }
 }
