@@ -1,60 +1,60 @@
+import { WebClient } from '@slack/web-api';
 import { SlackTeam } from './team';
 
-export interface SlackConversation {
-  readonly id: string;
+export abstract class SlackConversation {
+  protected isUpdating: boolean = false;
+  public unreadCount: number = 0;
 
-  updateContent();
-
-  postMessage(text: string);
-}
-
-export class SlackChannel implements SlackConversation {
-  public unreadCount: number;
-  private isUpdating: boolean = false;
-
-  constructor(
+  protected constructor(
     public readonly team: SlackTeam,
     public readonly id: string,
     public name: string,
-  ) { }
+  ) {}
 
-  updateInfo(connection) {
+  async updateInfo(client: WebClient) {
     this.isUpdating = true;
-    connection.reqAPI('channels.info', { channel: this.id }, (data) => {
-      this.isUpdating = false;
-      if ( data.ok ) {
-        this.name = data.channel.name;
-        this.unreadCount = data.channel.unread_count;
-        this.team.updateChannelListView();
-      }
-    });
+    const res = await client.conversations.info({ channel: this.id });
+    this.isUpdating = false;
+
+    if ( res.ok ) {
+      const channel = res.channel as any;
+      this.name = channel.name;
+      this.unreadCount = channel.unread_count;
+      this.team.updateChannelListView();
+    }
   }
 
-  updateContent() {
-    this.team.updateContent(this.id, '#' + this.name);
+  async postMessage(text: string) {
+    await this.team.postMessage(this.id, text);
   }
 
-  postMessage(text: string) {
-    this.team.postMessage(this.id, text);
-  }
+  abstract updateContent(): Promise<void>;
 
   isUpdatingInfo() {
     return this.isUpdating;
   }
 }
 
-export class SlackDM implements SlackConversation {
+export class SlackChannel extends SlackConversation {
   constructor(
     public readonly team: SlackTeam,
     public readonly id: string,
-    public readonly name: string,
-  ) { }
+    public name: string,
+  ) { super(team, id, name); }
 
-  updateContent() {
-    this.team.updateContent(this.id, '@' + this.name);
+  async updateContent() {
+    await this.team.updateContent(this.id, '#' + this.name);
   }
+}
 
-  postMessage(text: string) {
-    this.team.postMessage(this.id, text);
+export class SlackDM extends SlackConversation {
+  constructor(
+    public readonly team: SlackTeam,
+    public readonly id: string,
+    public name: string,
+  ) { super(team, id, name); }
+
+  async updateContent() {
+    await this.team.updateContent(this.id, '@' + this.name);
   }
 }

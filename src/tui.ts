@@ -17,16 +17,37 @@ export class SlackTUI {
     this.view = new SlackTUIView(this);
 
     this.loadConfig();
-    this.refreshTeamList();
+
+    Promise.resolve()
+      .then(() => this.view.contentBox.log(`{white-fg}Loading...{/white-fg}`))
+      .then(() => this.refreshTeamList())
+      .then(() => this.view.contentBox.log(`{green-fg}Loading complete!{/green-fg}`))
+      .then(() => this.view.contentBox.log(`{white-fg}To begin, select a team from the left{/white-fg}`))
+      .catch(err => this.view.contentBox.log(`Error: ${ err.message || err }`));
   }
 
-  refreshTeamList() {
-    const teamSelectorList = this.tokenList.map(({ name, token }) => {
-      this.teamDict.set(name, new SlackTeam(this, { name, token }));
-      return Blessed.text({ content: `${ name }(*)` });
-    });
-    this.view.teamBox.setItems(teamSelectorList);
-    this.view.screen.render();
+  async refreshTeamList() {
+    const {
+      contentBox: content,
+      teamBox: teams,
+      screen,
+    } = this.view;
+
+    try {
+      const selectors = [];
+
+      for ( const { name, token } of this.tokenList ) {
+        const team = new SlackTeam(this, { name, token });
+        this.teamDict.set(name, team);
+        await team.load();
+        selectors.push(`${ name }(*)`);
+      }
+      teams.setItems(selectors);
+      screen.render();
+    } catch ( e ) {
+      content.log(`Error: failed to refresh team list`);
+      content.log(e.message + '\n');
+    }
   }
 
   isTeamFocused(team: SlackTeam) {
@@ -35,10 +56,8 @@ export class SlackTUI {
 
   requestUpdateUserList(team: SlackTeam) {
     if ( team.isFocused() ) {
-      const elements = team.userSelectorList.map(
-        selector => Blessed.text({ content: selector }),
-      );
-      this.view.userBox.setItems(elements);
+      // @ts-ignore
+      this.view.userBox.setItems(team.userSelectorList);
       this.view.screen.render();
     }
   }
@@ -64,15 +83,20 @@ export class SlackTUI {
 
   focusTeamByName(teamName: string) {
     if ( this.teamDict.has(teamName) ) {
-      this.focusedTeam = this.teamDict.get(teamName);
-      this.focusedTeam.updateChannelListView();
-      this.requestUpdateUserList(this.focusedTeam);
+      this.focusTeam(this.teamDict.get(teamName));
     }
   }
 
-  sendMessage(text: string) {
-    if ( !this.focusedTeam ) return;
-    this.focusedTeam.sendMessage(text);
+  focusTeam(team: SlackTeam) {
+    this.focusedTeam = team;
+    this.focusedTeam.updateChannelListView();
+    this.requestUpdateUserList(this.focusedTeam);
+  }
+
+  async sendMessage(text: string) {
+    if ( this.focusedTeam ) {
+      await this.focusedTeam.sendMessage(text);
+    }
   }
 
   private loadConfig() {
@@ -112,10 +136,10 @@ export class SlackTUIView {
         border: { type: 'line' },
         label: ' Teams ',
         style: {
-          selected: { bg: 'red' },
           // @ts-ignore FIXME
-          border: { fg: '#f0f0f0' },
-          focus: { border: { fg: '#ff0000' } },
+          border: { fg: 'white' },
+          focus: { border: { fg: 'green' } },
+          selected: { fg: 'white', bg: 'green' },
         },
         keys: true,
       }),
@@ -130,9 +154,9 @@ export class SlackTUIView {
         border: { type: 'line' },
         style: {
           // @ts-ignore FIXME
-          border: { fg: '#f0f0f0' },
-          focus: { border: { fg: '#ff0000' } },
-          selected: { bg: 'red' },
+          border: { fg: 'white' },
+          focus: { border: { fg: 'green' } },
+          selected: { fg: 'white', bg: 'green' },
         },
         label: ' Channels ',
         keys: true,
@@ -148,9 +172,9 @@ export class SlackTUIView {
         border: { type: 'line' },
         style: {
           // @ts-ignore FIXME
-          border: { fg: '#f0f0f0' },
-          focus: { border: { fg: '#ff0000' } },
-          selected: { bg: 'red' },
+          border: { fg: 'white' },
+          focus: { border: { fg: 'green' } },
+          selected: { fg: 'white', bg: 'green' },
         },
         label: ' Users ',
         keys: true,
@@ -163,18 +187,24 @@ export class SlackTUIView {
         width: '75%',
         height: '80%+1',
         content: [
-          '='.repeat(32),
-          '{green-bg}Welcome to SlackTUI!{/green-bg}',
-          'Use {red-fg}Tab{/red-fg} key to move box focus.',
-          'Use cursor keys to choose item.',
-          '='.repeat(32),
-        ].join('\n'),
+          '='.repeat(40),
+          '{white-fg}Welcome to SlackTUI!{/white-fg}',
+          'Use {green-fg}Tab{/green-fg} key to move box focus.',
+          'Use {green-fg}cursor keys{/green-fg} to choose item.',
+          '='.repeat(40),
+        ].map((row) => {
+          const text = row.replace(/{\/?[a-z\-]+}/ig, '');
+          const width = Math.floor(parseInt(this.screen.width as string) * 0.75);
+          const room = width - text.length;
+          const padding = Math.floor(room / 2);
+          return ' '.repeat(padding) + row;
+        }).join('\n'),
         tags: true,
         border: { type: 'line' },
         style: {
           // @ts-ignore FIXME
-          focus: { border: { fg: '#ff0000' } },
-          border: { fg: '#f0f0f0' },
+          border: { fg: 'white' },
+          focus: { border: { fg: 'green' } },
         },
         keys: true,
         scrollable: true,
@@ -191,57 +221,60 @@ export class SlackTUIView {
         border: { type: 'line' },
         style: {
           // @ts-ignore FIXME
-          focus: { border: { fg: '#ff0000' } },
-          border: { fg: '#f0f0f0' },
-          fg: '#f0f0f0',
+          focus: { border: { fg: 'green' } },
+          border: { fg: 'white' },
+          fg: 'white',
         },
         keys: true,
       }),
     );
 
-    this.inputBox.on('submit', (text) => {
+    this.inputBox.on('submit', async (text) => {
       this.inputBox.clearValue();
       this.inputBox.cancel();
-      this.tui.sendMessage(text);
+      await this.tui.sendMessage(text);
     });
 
-    this.teamBox.on('select', (el, selected) => {
-      const teamName = toCanonicalName(el.getText());
-      this.tui.focusTeamByName(teamName);
-    });
-
-    this.channelBox.on('select', (el, selected) => {
-      this.tui.focusedTeam.selectChannel(el.getText());
-    });
-
-    this.userBox.on('select', (el, selected) => {
-      if ( this.tui.focusedTeam ) {
-        const user: SlackUser = this.tui.focusedTeam.userList[ selected ];
-        if ( user ) this.tui.focusedTeam.openIM(user.id, user.name);
+    this.teamBox.on('select', async (el, selected) => {
+      if ( el ) {
+        const teamName = toCanonicalName(el.getText());
+        this.tui.focusTeamByName(teamName);
       }
     });
 
-    this.screen.key([ 'C-c' ], (ch, key) => {
+    this.channelBox.on('select', async (el, selected) => {
+      const name = el?.getText();
+      if ( name ) await this.tui.focusedTeam?.selectChannel(name);
+    });
+
+    this.userBox.on('select', async (el, selected) => {
+      if ( this.tui.focusedTeam ) {
+        const user: SlackUser = this.tui.focusedTeam.userList[ selected ];
+        if ( user ) await this.tui.focusedTeam.openIM(user.id, user.name);
+      }
+    });
+
+    this.screen.key([ 'C-c' ], async (ch, key) => {
       return process.exit(0);
     });
 
-    this.screen.key([ 't' ], (ch, key) => {
+    this.screen.key([ 't' ], async (ch, key) => {
       this.teamBox.focus();
     });
 
-    this.teamBox.key([ 'tab' ], (ch, key) => {
+    this.teamBox.key([ 'tab' ], async (ch, key) => {
       this.channelBox.focus();
     });
-    this.channelBox.key([ 'tab' ], (ch, key) => {
+    this.channelBox.key([ 'tab' ], async (ch, key) => {
       this.userBox.focus();
     });
-    this.userBox.key([ 'tab' ], (ch, key) => {
+    this.userBox.key([ 'tab' ], async (ch, key) => {
       this.inputBox.focus();
     });
-    this.inputBox.key([ 'tab' ], (ch, key) => {
+    this.inputBox.key([ 'tab' ], async (ch, key) => {
       this.contentBox.focus();
     });
-    this.contentBox.key([ 'tab' ], (ch, key) => {
+    this.contentBox.key([ 'tab' ], async (ch, key) => {
       this.teamBox.focus();
     });
 

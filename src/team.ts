@@ -1,11 +1,7 @@
-import * as Blessed from 'blessed';
-import Notifier from 'node-notifier';
-// TODO: Replace with @slack/rtm-api
-import SlackAPI from 'slackbotapi';
+import { WebClient } from '@slack/web-api';
 
 import { Configuration } from './configuration';
 import { SlackChannel, SlackConversation, SlackDM } from './conversation';
-import { SlackRTMData } from './rtm';
 import { SlackTUI } from './tui';
 import { SlackUser } from './user';
 import { createLogger, Logger, toCanonicalName } from './util';
@@ -16,108 +12,106 @@ export class SlackTeam {
   public readonly name: string;
   public readonly token: string;
   public readonly log: Logger;
+  private readonly client: WebClient;
 
-  public connection: SlackAPI;
+  /** @deprecated TODO: Remove */
+  public connection;
+
   public currentConversation: SlackConversation;
+  public conversationMap: Map<String, SlackConversation> = new Map();
+
+  /** @deprecated */
   public channelMap: Map<String, SlackChannel>;
-  public userMap: Map<String, SlackUser>;
+  public userMap: Map<String, SlackUser> = new Map();
 
   constructor(private readonly tui: SlackTUI, config: Configuration.TeamTokenEntry) {
     this.name = config.name;
     this.token = config.token;
+    this.client = new WebClient(config.token);
 
-    this.connection = new SlackAPI({ token: this.token, logging: false, autoReconnect: true });
     this.log = createLogger(tui);
-
-    this.setRTMHandler();
-    this.updateChannelList();
-    this.updateUserList();
   }
 
-  setRTMHandler() {
-    this.connection.on('message', (data) => {
-      const channelId = SlackRTMData.getChannelId(data);
-      this.tui.view.contentBox.log(JSON.stringify(data) + '\n');
+  async load() {
+    await Promise.all([
+      this.updateChannelList(),
+      this.updateUserList(),
+    ]);
+  }
 
-      if ( this.currentConversation?.id === channelId ) {
-        // TODO: Improve performance (change to append new message only)
-        this.currentConversation.updateContent();
-      }
-      if ( !this.isNotificationSuppressed ) Notifier.notify(`New message on ${ this.name }`);
-    });
+  async selectChannel(channelName: string) {
+    const name = toCanonicalName(channelName);
+    const conversation = this.getChannelByName(name);
+    if ( conversation ) {
+      await conversation.updateContent();
+      this.currentConversation = conversation;
+    }
   }
 
   updateChannelListView() {
     if ( !this.isUpdatingInfo() && this.isFocused() ) {
       const channelSelectorList = this.channelList.map(({ name, unreadCount }) => {
-        return Blessed.text({ content: `${ name } (${ unreadCount })` });
+        return unreadCount > 0 ? `${ name } (${ unreadCount })` : name;
       });
-
-      this.log(`done: ${ this.name }`);
+      // @ts-ignore
       this.tui.view.channelBox.setItems(channelSelectorList);
       this.tui.view.screen.render();
     }
   }
 
-  selectChannel(channelName: string) {
-    const name = toCanonicalName(channelName);
-    const channel = this.getChannelByName(name);
-    if ( channel ) {
-      channel.updateContent();
-      this.currentConversation = channel;
+  async sendMessage(text: string) {
+    await this.currentConversation?.postMessage(text);
+  }
+
+  async postMessage(channel, text) {
+    if ( text?.trim() ) {
+      this.isNotificationSuppressed = true;
+      await this.client.chat.postMessage({ text, channel, as_user: true });
+      this.isNotificationSuppressed = false;
     }
   }
 
-  sendMessage(text: string) {
-    this.currentConversation?.postMessage(text);
+  async updateContent(id: string, nameForId: string) {
+    const content = this.tui.view.contentBox;
+
+    content.setContent('');
+    content.setLabel(` ${ this.name }/${ nameForId } `);
+    content.log(`Loading ${ nameForId }(${ id }) ...`);
+
+    const res = await this.client.conversations.history({ channel: id });
+
+    if ( res.ok ) {
+      const messages = (res.messages as any[])
+        .map(({ user, text }) => `${ this.getUserName(user) }: ${ text }`)
+        .reverse();
+      content.setContent('');
+      content.log(messages.join('\n'));
+    } else {
+      content.log('Failed: ' + JSON.stringify(res) + '\n');
+    }
   }
 
-  postMessage(channel, text) {
-    this.isNotificationSuppressed = true;
-    this.connection.reqAPI('chat.postMessage', { text, channel, as_user: true });
-    setTimeout(() => {
-      this.isNotificationSuppressed = false;
-    }, 1000);
-  }
-
-  updateContent(id: string, nameForId: string) {
-    const { view } = this.tui;
-
-    view.contentBox.setContent('');
-    view.contentBox.setLabel(this.name + '/' + nameForId);
-    view.contentBox.log(`Loading ${ nameForId }(${ id }) ...`);
-
-    this.connection.reqAPI('conversations.history', { channel: id }, (data) => {
-      if ( data.ok ) {
-        const messages = data.messages.map(({ user, text }) => `${ this.getUserName(user) }: ${ text }`)
-          .reverse();
-        view.contentBox.setContent('');
-        view.contentBox.log(messages.join('\n'));
-      } else {
-        view.contentBox.log('Failed: ' + JSON.stringify(data) + '\n');
-      }
-    });
-  }
-
-  openIM(id: string, name: string) {
+  // TODO: Opening a conversation should support multiple user IDs (for MPIM support)
+  async openIM(id: string, name: string) {
     const view = this.tui.view;
 
     view.contentBox.setContent('');
-    view.contentBox.setLabel(`${ this.name }/@${ name }`);
-    view.contentBox.log(`Opening IM with @${ name }(${ id }) ...`);
+    view.contentBox.setLabel(` ${ this.name }/@${ name } `);
+    view.contentBox.log(`Opening IM with @${ name } (${ id })`);
 
-    this.connection.reqAPI('im.open', { user: id }, (data) => {
-      if ( data.ok ) {
-        this.currentConversation = new SlackDM(this, data.channel.id, name);
-        this.currentConversation.updateContent();
-      } else {
-        view.contentBox.log('Failed: ' + JSON.stringify(data) + '\n');
-      }
-    });
+    const data = await this.client.conversations.open({ users: id });
+
+    if ( data.ok ) {
+      const { id: channelId } = data.channel as any;
+      this.currentConversation = new SlackDM(this, channelId, name);
+      await this.currentConversation.updateContent();
+    } else {
+      view.contentBox.log('Failed: ' + JSON.stringify(data) + '\n');
+    }
   }
 
-  getChannelById(channelId: string): SlackChannel {
-    return this.channelMap.get(channelId);
+  getConversationById<TConversation extends SlackConversation = SlackConversation>(id: string): TConversation {
+    return this.conversationMap.get(id) as TConversation;
   }
 
   getChannelByName(channelName: string): SlackChannel {
@@ -139,8 +133,13 @@ export class SlackTeam {
     return this.tui.focusedTeam === this;
   }
 
-  get channelList() {
-    return Array.from(this.channelMap.values());
+  get conversationList() {
+    return Array.from(this.conversationMap.values());
+  }
+
+  get channelList(): SlackChannel[] {
+    return this.conversationList
+      .filter(conversation => conversation instanceof SlackChannel) as SlackChannel[];
   }
 
   get userList() {
@@ -151,30 +150,38 @@ export class SlackTeam {
     return this.userList.map(({ name }) => `@${ name }`);
   }
 
-  private updateUserList() {
-    this.connection.reqAPI('users.list', { token: this.token }, (data) => {
-      if ( data.ok ) {
-        this.userMap = data.members.reduce((map, { id, name }) => {
-          map.set(id, new SlackUser(this, id, name));
-          return map;
-        }, new Map());
-        this.tui.requestUpdateUserList(this);
-      }
-    });
+  private async updateUserList() {
+    const res = await this.client.users.list();
+    if ( res.ok ) {
+      this.userMap = (res.members as any[]).reduce((map, { id, name }) => {
+        map.set(id, new SlackUser(this, id, name));
+        return map;
+      }, new Map());
+      this.tui.requestUpdateUserList(this);
+    }
   }
 
-  private updateChannelList() {
-    const { token } = this;
-    this.connection.reqAPI('channels.list', { token }, (data) => {
-      if ( data.ok ) {
-        this.channelMap = data.channels.reduce((map: Map<String, SlackChannel>, e) => {
-          const channel = new SlackChannel(this, e.id, e.name);
-          channel.updateInfo(this.connection);
-          map.set(channel.id, channel);
-          return map;
-        }, new Map());
-        this.updateChannelListView();
+  private async updateChannelList() {
+    const { ok, channels } = await this.client.conversations.list();
+    if ( ok ) {
+      const box = this.tui.view.contentBox;
+      this.conversationMap.clear();
+
+      for ( const data of channels as any[] ) {
+        const conversation = this.deserializeConversation(data);
+        await conversation.updateInfo(this.client);
+
+        this.conversationMap.set(conversation.id, conversation);
       }
-    });
+
+      this.updateChannelListView();
+    }
+  }
+
+  private deserializeConversation(conversation): SlackConversation {
+    if ( conversation.is_channel || conversation.is_group )
+      return new SlackChannel(this, conversation.id, conversation.name);
+    if ( conversation.is_im || conversation.is_mpim )
+      return new SlackDM(this, conversation.id, conversation.name);
   }
 }
